@@ -1,0 +1,4 @@
+module CMdCore {
+    umbrella header "CMdCore.h"
+    export *
+}

@@ -1,0 +1,11 @@
+.DS_Store
+**/.DS_Store
+
+# SwiftPM and packaged application output
+frontend/.build/
+frontend/.swiftpm/
+
+# Zig and CMake output; cmark-gfm is fetched at its pinned tag by bootstrap-cmark.sh
+frontend/Vendor/mdcore-zig/.zig-cache/
+frontend/Vendor/mdcore-zig/zig-out/
+frontend/Vendor/mdcore-zig/vendor/cmark-gfm/

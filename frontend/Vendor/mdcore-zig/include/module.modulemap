@@ -1,0 +1,4 @@
+module MdCore {
+    header "mdcore.h"
+    export *
+}
