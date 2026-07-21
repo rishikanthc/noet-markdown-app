@@ -2,10 +2,19 @@
   import AppKit
   import CMdCore
   import Foundation
+  import ImageIO
 
   /// A source-preserving renderer. It changes attributes only: every UTF-16
   /// code unit in MdCore remains present at the same NSTextStorage offset.
   final class MarkdownRenderer {
+    var documentURL: URL?
+    private var imageSizeCache: [URL: NSSize] = [:]
+
+    func updateIntrinsicImageSize(_ size: NSSize, for url: URL) {
+      guard size.width > 0, size.height > 0 else { return }
+      imageSizeCache[url] = size
+    }
+
     func baseAttributes() -> [NSAttributedString.Key: Any] {
       [
         .font: Theme.serif(Theme.sizeBody),
@@ -28,6 +37,7 @@
       let documentRange = NSRange(location: 0, length: storage.length)
       guard documentRange.length > 0 else {
         (textView as? MarkdownTextView)?.markdownDecorations = []
+        (textView as? MarkdownTextView)?.markdownImages = []
         textView.typingAttributes = baseAttributes()
         return documentRange
       }
@@ -57,16 +67,29 @@
       storage.beginEditing()
       applyAttributes(
         plan: plan, nodes: nodes, spans: spans, in: targetRange,
-        activeEditingRange: activeEditingRange, to: storage
+        activeEditingRange: activeEditingRange,
+        availableWidth: availableReadingWidth(in: textView),
+        to: storage
       )
       storage.endEditing()
       if let markdownTextView = textView as? MarkdownTextView {
         markdownTextView.markdownDecorations = decorations(
           for: plan, source: storage.string as NSString
         )
+        markdownTextView.markdownImages = imageDecorations(
+          for: plan, source: storage.string as NSString,
+          activeEditingRange: activeEditingRange
+        )
       }
       synchronizeTypingAttributes(in: textView, storage: storage)
       return targetRange
+    }
+
+    private func availableReadingWidth(in textView: NSTextView) -> CGFloat {
+      guard let width = textView.textContainer?.containerSize.width,
+        width.isFinite, width >= 128
+      else { return Theme.readingWidth }
+      return min(width, Theme.readingWidth)
     }
 
     private func compoundEnvelope(
@@ -128,6 +151,7 @@
       spans: [MarkdownRenderPlan.Span],
       in range: NSRange,
       activeEditingRange: NSRange?,
+      availableWidth: CGFloat,
       to storage: NSTextStorage
     ) {
       storage.setAttributes(baseAttributes(), range: range)
@@ -183,6 +207,12 @@
       applyHighlightSyntax(
         in: range, text: storage.string as NSString,
         activeEditingRange: activeEditingRange, storage: storage
+      )
+
+      applyImages(
+        nodes: nodes, in: range, source: storage.string as NSString,
+        activeEditingRange: activeEditingRange, availableWidth: availableWidth,
+        storage: storage
       )
 
       collapseStructuralBlankParagraphs(
@@ -397,6 +427,90 @@
         }
       }
       return result
+    }
+
+    private func imageDecorations(
+      for plan: MarkdownRenderPlan,
+      source: NSString,
+      activeEditingRange: NSRange?
+    ) -> [MarkdownTextView.ImageDecoration] {
+      plan.nodes.compactMap { node in
+        guard node.kind == Int(MD_NODE_IMAGE.rawValue),
+          activeEditingRange?.intersection(node.range) == nil,
+          let descriptor = MarkdownImageDescriptor.parse(range: node.range, source: source),
+          let url = descriptor.resolvedURL(relativeTo: documentURL),
+          let size = presentationImageSize(at: url)
+        else { return nil }
+        return MarkdownTextView.ImageDecoration(
+          range: node.range,
+          url: url,
+          width: descriptor.width,
+          intrinsicSize: size,
+          caption: descriptor.caption
+        )
+      }
+    }
+
+    private func applyImages(
+      nodes: [MarkdownRenderPlan.Node],
+      in targetRange: NSRange,
+      source: NSString,
+      activeEditingRange: NSRange?,
+      availableWidth: CGFloat,
+      storage: NSTextStorage
+    ) {
+      for node in nodes where node.kind == Int(MD_NODE_IMAGE.rawValue) {
+        guard activeEditingRange?.intersection(node.range) == nil,
+          let descriptor = MarkdownImageDescriptor.parse(range: node.range, source: source),
+          let url = descriptor.resolvedURL(relativeTo: documentURL),
+          let size = presentationImageSize(at: url),
+          let concealed = node.range.intersection(targetRange), concealed.length > 0
+        else { continue }
+
+        let width = min(descriptor.width, availableWidth)
+        let imageHeight = width * size.height / size.width
+        let captionHeight = descriptor.caption.isEmpty ? 0 : Theme.space3 + Theme.sizeCaption + 8
+        let style = NSMutableParagraphStyle()
+        style.alignment = .center
+        style.minimumLineHeight = imageHeight + captionHeight
+        style.maximumLineHeight = imageHeight + captionHeight
+        style.lineSpacing = 0
+        style.paragraphSpacingBefore = max(
+          Theme.space7 - precedingContentSpacing(
+            before: node.range, source: source, storage: storage
+          ) - Theme.bodyLineSpacing,
+          0
+        )
+        style.paragraphSpacing = max(Theme.space7 - Theme.bodyLineSpacing, 0)
+        style.lineBreakMode = .byClipping
+        let paragraph = source.paragraphRange(for: node.range)
+          .intersection(targetRange) ?? concealed
+        storage.addAttribute(.paragraphStyle, value: style, range: paragraph)
+        applyMarker(
+          to: concealed, activeEditingRange: nil, source: source, storage: storage
+        )
+      }
+    }
+
+    private func intrinsicImageSize(at url: URL) -> NSSize? {
+      if let cached = imageSizeCache[url] { return cached }
+      guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
+          as? [CFString: Any],
+        let width = properties[kCGImagePropertyPixelWidth] as? NSNumber,
+        let height = properties[kCGImagePropertyPixelHeight] as? NSNumber,
+        width.doubleValue > 0, height.doubleValue > 0
+      else { return nil }
+      let size = NSSize(width: width.doubleValue, height: height.doubleValue)
+      imageSizeCache[url] = size
+      return size
+    }
+
+    private func presentationImageSize(at url: URL) -> NSSize? {
+      if let size = imageSizeCache[url] { return size }
+      if url.isFileURL { return intrinsicImageSize(at: url) }
+      guard url.scheme == "https" || url.scheme == "http" else { return nil }
+      return NSSize(width: 16, height: 9)
     }
 
     private func applyCalloutLabels(

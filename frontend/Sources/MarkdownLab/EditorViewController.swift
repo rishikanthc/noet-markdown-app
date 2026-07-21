@@ -20,6 +20,7 @@
     private var sourceGeneration: UInt64 = 0
     private var activeEditingRange = NSRange(location: 0, length: 0)
     private var isApplyingPresentation = false
+    private var imageImportPanel: ImageImportPanelController?
 
     private let editorScrollView = NSScrollView()
     private lazy var textView = MarkdownTextView(usingTextLayoutManager: true)
@@ -80,6 +81,12 @@
 
     private func configureTextView() {
       textView.delegate = self
+      textView.imageDropHandler = { [weak self] url, insertion in
+        self?.configureDroppedImage(at: url, insertionLocation: insertion)
+      }
+      textView.imageLoadHandler = { [weak self] url, size in
+        self?.imageDidLoad(at: url, size: size)
+      }
       textView.isRichText = false
       textView.importsGraphics = false
       textView.allowsUndo = true
@@ -235,6 +242,79 @@
 
     // MARK: - File menu
 
+    private func configureDroppedImage(at sourceURL: URL, insertionLocation: Int) {
+      guard let window = view.window, NSImage(contentsOf: sourceURL) != nil else {
+        NSSound.beep()
+        return
+      }
+      let panel = ImageImportPanelController(
+        imageURL: sourceURL,
+        figureNumber: nextFigureNumber()
+      ) { [weak self] configuration in
+        guard let self else { return }
+        self.imageImportPanel = nil
+        guard let configuration else { return }
+        do {
+          let destination = try ImageAssetImporter.destination(
+            for: sourceURL, documentURL: self.currentURL
+          )
+          let imageMarkdown = MarkdownImageDescriptor.markdown(
+            caption: configuration.caption,
+            destination: destination,
+            width: configuration.width
+          )
+          let insertion = min(max(insertionLocation, 0), self.textView.string.utf16.count)
+          let replacement = self.blockInsertion(imageMarkdown, at: insertion)
+          self.textView.insertText(
+            replacement, replacementRange: NSRange(location: insertion, length: 0)
+          )
+          let selection = NSRange(location: insertion + (replacement as NSString).length, length: 0)
+          self.textView.setSelectedRange(selection)
+          self.textView.scrollRangeToVisible(selection)
+        } catch {
+          self.show(error: error)
+        }
+      }
+      imageImportPanel = panel
+      panel.present(asSheetFor: window)
+    }
+
+    private func imageDidLoad(at url: URL, size: NSSize) {
+      renderer.updateIntrinsicImageSize(size, for: url)
+      guard let plan = latestPlan, plan.source == textView.string else { return }
+      let source = plan.source as NSString
+      let affected = plan.nodes.compactMap { node -> NSRange? in
+        guard node.kind == Int(MD_NODE_IMAGE.rawValue),
+          let descriptor = MarkdownImageDescriptor.parse(range: node.range, source: source),
+          descriptor.resolvedURL(relativeTo: renderer.documentURL) == url
+        else { return nil }
+        return node.range
+      }.reduce(nil as NSRange?) { result, range in
+        result.map { NSUnionRange($0, range) } ?? range
+      }
+      guard let affected else { return }
+      applyPresentation(plan: plan, invalidatedRange: affected)
+    }
+
+    private func nextFigureNumber() -> Int {
+      if let latestPlan, latestPlan.source == textView.string {
+        return latestPlan.nodes.filter { $0.kind == Int(MD_NODE_IMAGE.rawValue) }.count + 1
+      }
+      let expression = try? NSRegularExpression(
+        pattern: #"!\[[^\]]*\]\("#, options: []
+      )
+      let source = textView.string
+      let range = NSRange(location: 0, length: (source as NSString).length)
+      return (expression?.numberOfMatches(in: source, range: range) ?? 0) + 1
+    }
+
+    private func blockInsertion(_ markdown: String, at location: Int) -> String {
+      let source = textView.string as NSString
+      let needsLeadingBreak = location > 0 && source.character(at: location - 1) != 0x0A
+      let needsTrailingBreak = location < source.length && source.character(at: location) != 0x0A
+      return (needsLeadingBreak ? "\n\n" : "") + markdown + (needsTrailingBreak ? "\n\n" : "\n")
+    }
+
     @objc func openDocument(_ sender: Any?) {
       let panel = NSOpenPanel()
       panel.allowedContentTypes = [.plainText]
@@ -258,6 +338,7 @@
           guard panel.runModal() == .OK, let url = panel.url else { return }
           destination = url
           currentURL = url
+          renderer.documentURL = url
         }
         try textView.string.write(to: destination, atomically: true, encoding: .utf8)
         statusLabel.stringValue = "Saved \(destination.path)"
@@ -326,6 +407,7 @@
         pendingInvalidatedRange = nil
         sourceGeneration = 0
         currentURL = url
+        renderer.documentURL = url
         textView.setSelectedRange(NSRange(location: 0, length: 0))
         activeEditingRange = paragraphRange(containing: 0)
         view.window?.title = url?.lastPathComponent ?? "MarkdownLab"

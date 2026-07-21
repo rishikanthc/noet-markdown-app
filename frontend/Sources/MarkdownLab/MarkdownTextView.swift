@@ -3,6 +3,14 @@
 
   /// TextKit 2 editor surface with a centered editorial reading column.
   final class MarkdownTextView: NSTextView {
+    struct ImageDecoration: Equatable {
+      let range: NSRange
+      let url: URL
+      let width: CGFloat
+      let intrinsicSize: NSSize
+      let caption: String
+    }
+
     struct Decoration: Equatable {
       enum Shape: Equatable {
         case inline(horizontalOutset: CGFloat, verticalOutset: CGFloat)
@@ -23,8 +31,18 @@
         needsDisplay = true
       }
     }
+    var markdownImages: [ImageDecoration] = [] {
+      didSet {
+        guard oldValue != markdownImages else { return }
+        needsDisplay = true
+      }
+    }
+    var imageDropHandler: ((URL, Int) -> Void)?
+    var imageLoadHandler: ((URL, NSSize) -> Void)?
 
     private var isUpdatingReadingGeometry = false
+    private var imageCache: [URL: NSImage] = [:]
+    private var pendingImageLoads: Set<URL> = []
 
     override func setFrameSize(_ newSize: NSSize) {
       super.setFrameSize(newSize)
@@ -33,6 +51,7 @@
 
     override func viewDidMoveToWindow() {
       super.viewDidMoveToWindow()
+      registerForDraggedTypes([.fileURL])
       updateReadingGeometry(for: bounds.width)
     }
 
@@ -43,8 +62,24 @@
       super.draw(dirtyRect)
     }
 
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+      imageURLs(from: sender.draggingPasteboard).isEmpty ? [] : .copy
+    }
+
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+      !imageURLs(from: sender.draggingPasteboard).isEmpty
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+      guard let url = imageURLs(from: sender.draggingPasteboard).first else { return false }
+      let point = convert(sender.draggingLocation, from: nil)
+      let insertion = characterIndexForInsertion(at: point)
+      imageDropHandler?(url, insertion)
+      return true
+    }
+
     private func drawMarkdownDecorations(in rect: NSRect) {
-      guard !markdownDecorations.isEmpty,
+      guard (!markdownDecorations.isEmpty || !markdownImages.isEmpty),
         let contentManager = textContentStorage,
         let layoutManager = textLayoutManager
       else { return }
@@ -101,6 +136,132 @@
             .fill()
         }
       }
+
+      drawImages(in: rect, visibleRange: visibleRange, contentManager: contentManager, layoutManager: layoutManager)
+    }
+
+    private func drawImages(
+      in dirtyRect: NSRect,
+      visibleRange: NSRange?,
+      contentManager: NSTextContentManager,
+      layoutManager: NSTextLayoutManager
+    ) {
+      for decoration in markdownImages where visibleRange?.intersection(decoration.range) != nil || visibleRange == nil {
+        guard let textRange = textRange(for: decoration.range, contentManager: contentManager)
+        else { continue }
+        layoutManager.ensureLayout(for: textRange)
+        var union = CGRect.null
+        layoutManager.enumerateTextSegments(
+          in: textRange, type: .standard, options: [.rangeNotRequired]
+        ) { _, frame, _, _ in
+          guard !frame.isNull, !frame.isInfinite, frame.height > 0 else { return true }
+          union = union.union(frame.offsetBy(dx: self.textContainerOrigin.x, dy: self.textContainerOrigin.y))
+          return true
+        }
+        guard !union.isNull, let textContainer else { continue }
+        let availableWidth = textContainer.containerSize.width
+        let imageWidth = min(decoration.width, availableWidth)
+        let ratio = decoration.intrinsicSize.width / max(decoration.intrinsicSize.height, 1)
+        let imageHeight = imageWidth / max(ratio, 0.01)
+        let imageRect = CGRect(
+          x: textContainerOrigin.x + (availableWidth - imageWidth) / 2,
+          y: union.minY,
+          width: imageWidth,
+          height: imageHeight
+        )
+        guard imageRect.union(union).intersects(dirtyRect) else { continue }
+        if let image = cachedImage(at: decoration.url) {
+          NSGraphicsContext.saveGraphicsState()
+          NSBezierPath(
+            roundedRect: imageRect, xRadius: Theme.radiusSmall, yRadius: Theme.radiusSmall
+          ).addClip()
+          image.draw(
+            in: imageRect, from: .zero, operation: .sourceOver, fraction: 1,
+            respectFlipped: true, hints: [.interpolation: NSImageInterpolation.high]
+          )
+          NSGraphicsContext.restoreGraphicsState()
+          Theme.hairline.setStroke()
+          let border = NSBezierPath(
+            roundedRect: imageRect, xRadius: Theme.radiusSmall, yRadius: Theme.radiusSmall
+          )
+          border.lineWidth = 1
+          border.stroke()
+        }
+        if !decoration.caption.isEmpty {
+          drawCaption(
+            decoration.caption,
+            in: CGRect(
+              x: textContainerOrigin.x,
+              y: imageRect.maxY + Theme.space3,
+              width: availableWidth,
+              height: Theme.sizeCaption + 8
+            )
+          )
+        }
+      }
+    }
+
+    private func drawCaption(_ caption: String, in rect: CGRect) {
+      let paragraph = NSMutableParagraphStyle()
+      paragraph.alignment = .center
+      let attributed = NSMutableAttributedString(
+        string: caption,
+        attributes: [
+          .font: Theme.serif(Theme.sizeCaption),
+          .foregroundColor: Theme.inkSoft,
+          .paragraphStyle: paragraph,
+        ]
+      )
+      if let expression = try? NSRegularExpression(
+        pattern: #"^Figure\s+[0-9]+\."#, options: [.caseInsensitive]
+      ), let match = expression.firstMatch(
+        in: caption, range: NSRange(location: 0, length: (caption as NSString).length)
+      ) {
+        attributed.addAttributes([
+          .font: Theme.mono(Theme.sizeMicro, weight: .bold),
+          .foregroundColor: Theme.orange,
+          .kern: 0.75,
+        ], range: match.range)
+      }
+      attributed.draw(
+        with: rect, options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil
+      )
+    }
+
+    private func cachedImage(at url: URL) -> NSImage? {
+      if let cached = imageCache[url] { return cached }
+      guard pendingImageLoads.insert(url).inserted else { return nil }
+      if url.isFileURL {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+          let image = NSImage(contentsOf: url)
+          DispatchQueue.main.async { self?.completeImageLoad(image, from: url) }
+        }
+      } else if url.scheme == "https" || url.scheme == "http" {
+        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+          let image = data.flatMap(NSImage.init(data:))
+          DispatchQueue.main.async { self?.completeImageLoad(image, from: url) }
+        }.resume()
+      } else {
+        pendingImageLoads.remove(url)
+      }
+      return nil
+    }
+
+    private func completeImageLoad(_ image: NSImage?, from url: URL) {
+      pendingImageLoads.remove(url)
+      if let image {
+        imageCache[url] = image
+        imageLoadHandler?(url, image.size)
+      }
+      needsDisplay = true
+    }
+
+    private func imageURLs(from pasteboard: NSPasteboard) -> [URL] {
+      let options: [NSPasteboard.ReadingOptionKey: Any] = [
+        .urlReadingFileURLsOnly: true,
+        .urlReadingContentsConformToTypes: ["public.image"],
+      ]
+      return (pasteboard.readObjects(forClasses: [NSURL.self], options: options) as? [URL]) ?? []
     }
 
     private func updateReadingGeometry(for viewWidth: CGFloat) {
