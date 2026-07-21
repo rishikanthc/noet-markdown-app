@@ -18,7 +18,7 @@
     private var pendingNativeEdits: [PendingNativeEdit] = []
     private var pendingInvalidatedRange: NSRange?
     private var sourceGeneration: UInt64 = 0
-    private var activeParagraphRange = NSRange(location: 0, length: 0)
+    private var activeEditingRange = NSRange(location: 0, length: 0)
     private var isApplyingPresentation = false
 
     private let editorScrollView = NSScrollView()
@@ -106,7 +106,9 @@
 
       textView.appearance = NSAppearance(named: .aqua)
       textView.backgroundColor = Theme.paper
-      textView.drawsBackground = true
+      // MarkdownTextView paints the paper and semantic surfaces before asking
+      // TextKit 2 to draw glyphs and selections.
+      textView.drawsBackground = false
       textView.insertionPointColor = Theme.accent
       textView.selectedTextAttributes = [.backgroundColor: Theme.accentSoft]
       editorScrollView.backgroundColor = Theme.paper
@@ -147,11 +149,16 @@
 
     func textViewDidChangeSelection(_ notification: Notification) {
       guard !isApplyingPresentation, !textView.hasMarkedText() else { return }
-      let next = paragraphRange(containing: textView.selectedRange().location)
-      guard next != activeParagraphRange else { return }
-      let changed = NSUnionRange(activeParagraphRange, next)
-      activeParagraphRange = next
-      guard let plan = latestPlan, plan.source == textView.string else { return }
+      guard let plan = latestPlan, plan.source == textView.string else {
+        activeEditingRange = paragraphRange(containing: textView.selectedRange().location)
+        return
+      }
+      let next = renderer.editingRange(
+        containing: textView.selectedRange().location, in: plan
+      )
+      guard next != activeEditingRange else { return }
+      let changed = NSUnionRange(activeEditingRange, next)
+      activeEditingRange = next
       applyPresentation(plan: plan, invalidatedRange: changed)
     }
 
@@ -182,7 +189,16 @@
             return
           }
           self.latestPlan = plan
-          let target = self.pendingInvalidatedRange
+          let previousEditingRange = self.activeEditingRange
+          let nextEditingRange = self.renderer.editingRange(
+            containing: self.textView.selectedRange().location, in: plan
+          )
+          self.activeEditingRange = nextEditingRange
+          var target = self.pendingInvalidatedRange
+          if previousEditingRange != nextEditingRange {
+            let activationChange = NSUnionRange(previousEditingRange, nextEditingRange)
+            target = target.map { NSUnionRange($0, activationChange) } ?? activationChange
+          }
           self.pendingInvalidatedRange = nil
           self.applyPresentation(plan: plan, invalidatedRange: target)
           let elapsed = started.duration(to: ContinuousClock().now)
@@ -203,7 +219,7 @@
       renderer.apply(
         plan: plan,
         invalidatedRange: invalidatedRange,
-        activeParagraphRange: activeParagraphRange,
+        activeEditingRange: activeEditingRange,
         to: textView
       )
       isApplyingPresentation = false
@@ -311,7 +327,7 @@
         sourceGeneration = 0
         currentURL = url
         textView.setSelectedRange(NSRange(location: 0, length: 0))
-        activeParagraphRange = paragraphRange(containing: 0)
+        activeEditingRange = paragraphRange(containing: 0)
         view.window?.title = url?.lastPathComponent ?? "MarkdownLab"
         scheduleSemanticRefresh(immediate: true)
       } catch {
