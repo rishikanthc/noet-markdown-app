@@ -1,0 +1,22 @@
+.{
+    .name = .mdcore,
+    .version = "0.2.0",
+    .fingerprint = 0x23d336f9e9890441,
+    .minimum_zig_version = "0.16.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "include",
+        ".github",
+        "src",
+        "tests",
+        "scripts",
+        "vendor",
+        "README.md",
+        "CHANGELOG.md",
+        "SECURITY.md",
+        "VALIDATION.md",
+        "docs",
+        "LICENSE",
+    },
+}

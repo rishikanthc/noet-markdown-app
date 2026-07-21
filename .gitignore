@@ -1,5 +1,7 @@
 .DS_Store
 **/.DS_Store
+**/__pycache__/
+*.pyc
 
 # SwiftPM and packaged application output
 frontend/.build/
@@ -9,3 +11,6 @@ frontend/.swiftpm/
 frontend/Vendor/mdcore-zig/.zig-cache/
 frontend/Vendor/mdcore-zig/zig-out/
 frontend/Vendor/mdcore-zig/vendor/cmark-gfm/
+engine/.zig-cache/
+engine/zig-out/
+engine/vendor/cmark-gfm/

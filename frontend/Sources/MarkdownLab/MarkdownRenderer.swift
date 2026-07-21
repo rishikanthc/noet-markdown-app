@@ -158,6 +158,10 @@
         in: range, text: storage.string as NSString,
         activeEditingRange: activeEditingRange, storage: storage
       )
+
+      collapseStructuralBlankParagraphs(
+        in: range, nodes: nodes, source: storage.string as NSString, storage: storage
+      )
     }
 
     private func applyBlockRole(
@@ -172,7 +176,12 @@
         storage.addAttributes([
           .font: Theme.sans(Theme.headingSizes[level - 1], weight: .semibold),
           .foregroundColor: level == 1 ? Theme.ink : Theme.inkSoft,
-          .paragraphStyle: headingParagraphStyle(level: level),
+          .paragraphStyle: headingParagraphStyle(
+            level: level,
+            precedingSpacing: precedingContentSpacing(
+              before: range, source: source, storage: storage
+            )
+          ),
           .kern: level <= 2 ? -0.22 : 0,
         ], range: range)
       case Int(MD_NODE_CODE_BLOCK.rawValue):
@@ -181,14 +190,18 @@
           .foregroundColor: Theme.textCol,
           .ligature: 0,
         ], range: range)
-        applyComponentParagraphStyles(range: range, source: source, storage: storage)
+        applyComponentParagraphStyles(
+          range: range, kind: .code, source: source, storage: storage
+        )
       case Int(MD_NODE_BLOCK_QUOTE.rawValue):
         guard callout(in: range, source: source) != nil else { return }
         storage.addAttributes([
           .font: Theme.serif(Theme.sizeBodySmall),
           .foregroundColor: Theme.textCol,
         ], range: range)
-        applyComponentParagraphStyles(range: range, source: source, storage: storage)
+        applyComponentParagraphStyles(
+          range: range, kind: .callout, source: source, storage: storage
+        )
       default:
         break
       }
@@ -519,6 +532,12 @@
       }
       let location = min(selection.location, storage.length - 1)
       var attributes = storage.attributes(at: location, effectiveRange: nil)
+      if let style = attributes[.paragraphStyle] as? NSParagraphStyle,
+        style.maximumLineHeight > 0, style.maximumLineHeight <= 0.1
+      {
+        textView.typingAttributes = baseAttributes()
+        return
+      }
       // Selection and spelling are transient presentation concerns, never
       // attributes that newly inserted source characters should inherit.
       attributes.removeValue(forKey: .backgroundColor)
@@ -535,27 +554,36 @@
       return style
     }
 
-    private func headingParagraphStyle(level: Int) -> NSParagraphStyle {
+    private func headingParagraphStyle(
+      level: Int,
+      precedingSpacing: CGFloat
+    ) -> NSParagraphStyle {
       let style = NSMutableParagraphStyle()
       style.firstLineHeadIndent = 0
       style.headIndent = 0
       style.lineSpacing = level <= 2 ? 1.5 : 2
       switch level {
       case 1:
-        style.paragraphSpacingBefore = Theme.space9
+        style.paragraphSpacingBefore = max(Theme.space9 - precedingSpacing, 0)
         style.paragraphSpacing = Theme.space4
       case 2:
-        style.paragraphSpacingBefore = Theme.space8
+        style.paragraphSpacingBefore = max(Theme.space8 - precedingSpacing, 0)
         style.paragraphSpacing = Theme.space3
       default:
-        style.paragraphSpacingBefore = Theme.space5
+        style.paragraphSpacingBefore = max(Theme.space5 - precedingSpacing, 0)
         style.paragraphSpacing = Theme.space2
       }
       return style
     }
 
+    private enum ComponentKind {
+      case code
+      case callout
+    }
+
     private func applyComponentParagraphStyles(
       range: NSRange,
+      kind: ComponentKind,
       source: NSString,
       storage: NSTextStorage
     ) {
@@ -567,18 +595,81 @@
         paragraphs.append(clipped)
         location = NSMaxRange(paragraph)
       }
+      let precedingSpacing = precedingContentSpacing(
+        before: range, source: source, storage: storage
+      )
       for (index, paragraph) in paragraphs.enumerated() {
         let style = NSMutableParagraphStyle()
         style.firstLineHeadIndent = Theme.space4
         style.headIndent = Theme.space4
         style.tailIndent = -Theme.space4
         style.lineSpacing = Theme.bodyLineSpacing
-        style.paragraphSpacingBefore = index == 0 ? Theme.space6 + Theme.space3 : 0
-        style.paragraphSpacing = index == paragraphs.count - 1
-          ? Theme.space6 + Theme.space3
-          : Theme.space1
+        style.paragraphSpacingBefore = index == 0
+          ? max(Theme.space6 + Theme.space3 - precedingSpacing, 0)
+          : 0
+        if index == paragraphs.count - 1 {
+          style.paragraphSpacing = Theme.space6 + Theme.space3
+        } else if kind == .callout, index == 0 {
+          style.paragraphSpacing = Theme.space1
+        } else {
+          style.paragraphSpacing = 0
+        }
         style.lineBreakMode = .byWordWrapping
         storage.addAttribute(.paragraphStyle, value: style, range: paragraph)
+      }
+    }
+
+    private func precedingContentSpacing(
+      before range: NSRange,
+      source: NSString,
+      storage: NSTextStorage
+    ) -> CGFloat {
+      guard range.location > 0 else { return 0 }
+      var location = range.location - 1
+      while location > 0 {
+        let scalar = source.character(at: location)
+        if scalar != 0x20, scalar != 0x09, scalar != 0x0A, scalar != 0x0D { break }
+        location -= 1
+      }
+      let style = storage.attribute(
+        .paragraphStyle, at: location, effectiveRange: nil
+      ) as? NSParagraphStyle
+      let spacing = style?.paragraphSpacing ?? 0
+      // Component margins deliberately accumulate with other component
+      // margins. Only ordinary prose/heading after-spacing is compensated.
+      return spacing < Theme.space6 ? spacing : 0
+    }
+
+    private func collapseStructuralBlankParagraphs(
+      in range: NSRange,
+      nodes: [MarkdownRenderPlan.Node],
+      source: NSString,
+      storage: NSTextStorage
+    ) {
+      let compoundRanges = nodes.compactMap { node -> NSRange? in
+        if node.kind == Int(MD_NODE_CODE_BLOCK.rawValue) { return node.range }
+        if node.kind == Int(MD_NODE_BLOCK_QUOTE.rawValue),
+          callout(in: node.range, source: source) != nil
+        { return node.range }
+        return nil
+      }
+      var location = range.location
+      while location < NSMaxRange(range) {
+        let paragraph = source.paragraphRange(for: NSRange(location: location, length: 0))
+        guard let clipped = paragraph.intersection(range), clipped.length > 0 else { break }
+        let content = source.substring(with: clipped)
+          .trimmingCharacters(in: .whitespacesAndNewlines)
+        let belongsToComponent = compoundRanges.contains { $0.intersection(clipped) != nil }
+        if content.isEmpty, !belongsToComponent {
+          let style = NSMutableParagraphStyle()
+          style.minimumLineHeight = 0.1
+          style.maximumLineHeight = 0.1
+          style.lineSpacing = 0
+          style.paragraphSpacing = 0
+          style.paragraphSpacingBefore = 0
+          storage.addAttribute(.paragraphStyle, value: style, range: clipped)
+        }
+        location = NSMaxRange(paragraph)
       }
     }
 

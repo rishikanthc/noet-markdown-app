@@ -266,8 +266,72 @@
           .paragraphStyle, at: text.range(of: token).location, effectiveRange: nil
         ) as? NSParagraphStyle
         XCTAssertEqual(style?.paragraphSpacingBefore, 0)
-        XCTAssertEqual(style?.paragraphSpacing, Theme.space1)
+        XCTAssertEqual(style?.paragraphSpacing, 0)
       }
+    }
+
+    func testStructuralBlankLinesDoNotAddLayoutHeightToTypstMargins() throws {
+      let source = """
+        Intro paragraph.
+
+        ## Section
+
+        Body paragraph.
+
+        > [!NOTE]
+        > Compact body.
+
+        After callout.
+        """
+      let text = source as NSString
+      let plan = try renderPlan(source)
+      let textView = MarkdownTextView(usingTextLayoutManager: true)
+      textView.string = source
+      MarkdownRenderer().apply(plan: plan, invalidatedRange: nil, to: textView)
+
+      var searchLocation = 0
+      var blankCount = 0
+      while searchLocation < text.length {
+        let paragraph = text.paragraphRange(
+          for: NSRange(location: searchLocation, length: 0)
+        )
+        let content = text.substring(with: paragraph)
+          .trimmingCharacters(in: .whitespacesAndNewlines)
+        if content.isEmpty {
+          blankCount += 1
+          let style = textView.textStorage?.attribute(
+            .paragraphStyle, at: paragraph.location, effectiveRange: nil
+          ) as? NSParagraphStyle
+          XCTAssertEqual(style?.maximumLineHeight, 0.1)
+          XCTAssertEqual(style?.paragraphSpacing, 0)
+        }
+        searchLocation = NSMaxRange(paragraph)
+      }
+      XCTAssertEqual(blankCount, 4)
+
+      let introStyle = textView.textStorage?.attribute(
+        .paragraphStyle, at: text.range(of: "Intro paragraph").location, effectiveRange: nil
+      ) as? NSParagraphStyle
+      let headingStyle = textView.textStorage?.attribute(
+        .paragraphStyle, at: text.range(of: "Section").location, effectiveRange: nil
+      ) as? NSParagraphStyle
+      XCTAssertEqual(
+        (introStyle?.paragraphSpacing ?? 0) + (headingStyle?.paragraphSpacingBefore ?? 0),
+        Theme.space8,
+        accuracy: 0.01
+      )
+
+      let bodyStyle = textView.textStorage?.attribute(
+        .paragraphStyle, at: text.range(of: "Body paragraph").location, effectiveRange: nil
+      ) as? NSParagraphStyle
+      let calloutStyle = textView.textStorage?.attribute(
+        .paragraphStyle, at: text.range(of: "> [!NOTE]").location, effectiveRange: nil
+      ) as? NSParagraphStyle
+      XCTAssertEqual(
+        (bodyStyle?.paragraphSpacing ?? 0) + (calloutStyle?.paragraphSpacingBefore ?? 0),
+        Theme.space6 + Theme.space3,
+        accuracy: 0.01
+      )
     }
 
     func testSemanticRestyleDoesNotMoveCaretAfterTyping() throws {
