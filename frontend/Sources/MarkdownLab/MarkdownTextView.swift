@@ -34,15 +34,20 @@
     var markdownImages: [ImageDecoration] = [] {
       didSet {
         guard oldValue != markdownImages else { return }
+        if markdownImages.isEmpty { imageHitRegions = [] }
         needsDisplay = true
+        window?.invalidateCursorRects(for: self)
       }
     }
     var imageDropHandler: ((URL, Int) -> Void)?
     var imageLoadHandler: ((URL, NSSize) -> Void)?
+    var imageClickHandler: ((NSRange) -> Void)?
 
     private var isUpdatingReadingGeometry = false
     private var imageCache: [URL: NSImage] = [:]
     private var pendingImageLoads: Set<URL> = []
+    private var failedImageURLs: Set<URL> = []
+    private var imageHitRegions: [(range: NSRange, rect: NSRect)] = []
 
     override func setFrameSize(_ newSize: NSSize) {
       super.setFrameSize(newSize)
@@ -76,6 +81,20 @@
       let insertion = characterIndexForInsertion(at: point)
       imageDropHandler?(url, insertion)
       return true
+    }
+
+    override func mouseDown(with event: NSEvent) {
+      let point = convert(event.locationInWindow, from: nil)
+      if let hit = imageHitRegions.first(where: { $0.rect.contains(point) }) {
+        imageClickHandler?(hit.range)
+        return
+      }
+      super.mouseDown(with: event)
+    }
+
+    override func resetCursorRects() {
+      super.resetCursorRects()
+      for hit in imageHitRegions { addCursorRect(hit.rect, cursor: .pointingHand) }
     }
 
     private func drawMarkdownDecorations(in rect: NSRect) {
@@ -146,6 +165,7 @@
       contentManager: NSTextContentManager,
       layoutManager: NSTextLayoutManager
     ) {
+      var hitRegions: [(range: NSRange, rect: NSRect)] = []
       for decoration in markdownImages where visibleRange?.intersection(decoration.range) != nil || visibleRange == nil {
         guard let textRange = textRange(for: decoration.range, contentManager: contentManager)
         else { continue }
@@ -169,6 +189,7 @@
           width: imageWidth,
           height: imageHeight
         )
+        hitRegions.append((decoration.range, imageRect))
         guard imageRect.union(union).intersects(dirtyRect) else { continue }
         if let image = cachedImage(at: decoration.url) {
           NSGraphicsContext.saveGraphicsState()
@@ -186,6 +207,8 @@
           )
           border.lineWidth = 1
           border.stroke()
+        } else if failedImageURLs.contains(decoration.url) {
+          drawImageFailure(in: imageRect)
         }
         if !decoration.caption.isEmpty {
           drawCaption(
@@ -199,6 +222,36 @@
           )
         }
       }
+      imageHitRegions = hitRegions
+      window?.invalidateCursorRects(for: self)
+    }
+
+    private func drawImageFailure(in rect: NSRect) {
+      Theme.surfaceSubtle.setFill()
+      NSBezierPath(roundedRect: rect, xRadius: Theme.radiusSmall, yRadius: Theme.radiusSmall).fill()
+      let message = NSMutableAttributedString(
+        string: "Image unavailable\nClick to edit the source or try again",
+        attributes: [
+          .font: Theme.sans(Theme.sizeCaption, weight: .medium),
+          .foregroundColor: Theme.muted,
+        ]
+      )
+      let paragraph = NSMutableParagraphStyle()
+      paragraph.alignment = .center
+      paragraph.lineSpacing = 4
+      message.addAttribute(.paragraphStyle, value: paragraph, range: NSRange(location: 0, length: message.length))
+      let size = message.boundingRect(
+        with: NSSize(width: max(rect.width - 40, 1), height: rect.height),
+        options: [.usesLineFragmentOrigin, .usesFontLeading]
+      ).size
+      message.draw(
+        in: NSRect(
+          x: rect.midX - size.width / 2,
+          y: rect.midY - size.height / 2,
+          width: size.width,
+          height: size.height
+        )
+      )
     }
 
     private func drawCaption(_ caption: String, in rect: CGRect) {
@@ -237,8 +290,16 @@
           DispatchQueue.main.async { self?.completeImageLoad(image, from: url) }
         }
       } else if url.scheme == "https" || url.scheme == "http" {
-        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
-          let image = data.flatMap(NSImage.init(data:))
+        var request = URLRequest(
+          url: url, cachePolicy: .returnCacheDataElseLoad, timeoutInterval: 30
+        )
+        request.setValue("image/avif,image/webp,image/*,*/*;q=0.8", forHTTPHeaderField: "Accept")
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+          let http = response as? HTTPURLResponse
+          let isSuccessful = error == nil
+            && (http.map { (200...299).contains($0.statusCode) } ?? false)
+            && (http?.mimeType?.hasPrefix("image/") ?? false)
+          let image = isSuccessful ? data.flatMap(NSImage.init(data:)) : nil
           DispatchQueue.main.async { self?.completeImageLoad(image, from: url) }
         }.resume()
       } else {
@@ -250,10 +311,17 @@
     private func completeImageLoad(_ image: NSImage?, from url: URL) {
       pendingImageLoads.remove(url)
       if let image {
+        failedImageURLs.remove(url)
         imageCache[url] = image
         imageLoadHandler?(url, image.size)
+      } else {
+        failedImageURLs.insert(url)
       }
       needsDisplay = true
+    }
+
+    func cachedImageForPresentation(at url: URL) -> NSImage? {
+      imageCache[url]
     }
 
     private func imageURLs(from pasteboard: NSPasteboard) -> [URL] {

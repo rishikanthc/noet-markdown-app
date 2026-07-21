@@ -87,6 +87,9 @@
       textView.imageLoadHandler = { [weak self] url, size in
         self?.imageDidLoad(at: url, size: size)
       }
+      textView.imageClickHandler = { [weak self] range in
+        self?.editImage(in: range)
+      }
       textView.isRichText = false
       textView.importsGraphics = false
       textView.allowsUndo = true
@@ -133,6 +136,55 @@
         PendingNativeEdit(range: affectedCharRange, replacement: replacementString ?? "")
       )
       return true
+    }
+
+    func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+      guard let plan = latestPlan, plan.source == textView.string,
+        let target = Self.imageNavigationTarget(
+          for: commandSelector,
+          selection: textView.selectedRange(),
+          plan: plan
+        )
+      else { return false }
+
+      let previous = activeEditingRange
+      isApplyingPresentation = true
+      textView.setSelectedRange(NSRange(location: target, length: 0))
+      isApplyingPresentation = false
+      let next = target == (plan.source as NSString).length
+        ? NSRange(location: target, length: 0)
+        : renderer.editingRange(containing: target, in: plan)
+      activeEditingRange = next
+      applyPresentation(plan: plan, invalidatedRange: NSUnionRange(previous, next))
+      textView.scrollRangeToVisible(NSRange(location: target, length: 0))
+      return true
+    }
+
+    static func imageNavigationTarget(
+      for commandSelector: Selector,
+      selection: NSRange,
+      plan: MarkdownRenderPlan
+    ) -> Int? {
+      guard selection.length == 0,
+        commandSelector == #selector(NSResponder.moveDown(_:))
+          || commandSelector == #selector(NSResponder.moveUp(_:))
+      else { return nil }
+      let source = plan.source as NSString
+      let probe = min(selection.location, max(source.length - 1, 0))
+      guard let image = plan.nodes.first(where: { node in
+        node.kind == Int(MD_NODE_IMAGE.rawValue)
+          && (NSLocationInRange(probe, node.range)
+            || selection.location == NSMaxRange(node.range))
+      }) else { return nil }
+      let paragraph = source.paragraphRange(for: image.range)
+      if commandSelector == #selector(NSResponder.moveDown(_:)) {
+        return min(NSMaxRange(paragraph), source.length)
+      }
+      guard paragraph.location > 0 else { return nil }
+      let previous = source.paragraphRange(
+        for: NSRange(location: paragraph.location - 1, length: 0)
+      )
+      return previous.location
     }
 
     func textDidChange(_ notification: Notification) {
@@ -296,6 +348,50 @@
       applyPresentation(plan: plan, invalidatedRange: affected)
     }
 
+    private func editImage(in range: NSRange) {
+      guard imageImportPanel == nil,
+        let window = view.window,
+        let plan = latestPlan, plan.source == textView.string
+      else { return }
+      let source = plan.source as NSString
+      guard let node = plan.nodes.first(where: {
+        $0.kind == Int(MD_NODE_IMAGE.rawValue) && $0.range.intersection(range) != nil
+      }), let descriptor = MarkdownImageDescriptor.parse(range: node.range, source: source),
+        let url = descriptor.resolvedURL(relativeTo: renderer.documentURL)
+      else { return }
+
+      let panel = ImageImportPanelController(
+        imageURL: url,
+        configuration: ImageImportConfiguration(
+          width: descriptor.width,
+          caption: descriptor.caption.isEmpty ? nil : descriptor.caption
+        ),
+        isEditing: true,
+        previewImage: textView.cachedImageForPresentation(at: url)
+      ) { [weak self] configuration in
+        guard let self else { return }
+        self.imageImportPanel = nil
+        guard let configuration else { return }
+        let replacement = MarkdownImageDescriptor.markdown(
+          caption: configuration.caption,
+          destination: descriptor.destination,
+          width: configuration.width
+        )
+        let replacementLength = (replacement as NSString).length
+        let oldEnd = NSMaxRange(node.range)
+        let followedByNewline = oldEnd < source.length && source.character(at: oldEnd) == 0x0A
+        self.textView.undoManager?.beginUndoGrouping()
+        self.textView.insertText(replacement, replacementRange: node.range)
+        self.textView.undoManager?.endUndoGrouping()
+        let afterImage = node.range.location + replacementLength + (followedByNewline ? 1 : 0)
+        let target = min(afterImage, (self.textView.string as NSString).length)
+        self.textView.setSelectedRange(NSRange(location: target, length: 0))
+        self.textView.scrollRangeToVisible(NSRange(location: node.range.location, length: replacementLength))
+      }
+      imageImportPanel = panel
+      panel.present(asSheetFor: window)
+    }
+
     private func nextFigureNumber() -> Int {
       if let latestPlan, latestPlan.source == textView.string {
         return latestPlan.nodes.filter { $0.kind == Int(MD_NODE_IMAGE.rawValue) }.count + 1
@@ -311,8 +407,10 @@
     private func blockInsertion(_ markdown: String, at location: Int) -> String {
       let source = textView.string as NSString
       let needsLeadingBreak = location > 0 && source.character(at: location - 1) != 0x0A
-      let needsTrailingBreak = location < source.length && source.character(at: location) != 0x0A
-      return (needsLeadingBreak ? "\n\n" : "") + markdown + (needsTrailingBreak ? "\n\n" : "\n")
+      let trailingBreak = location == source.length
+        ? "\n\n"
+        : (source.character(at: location) == 0x0A ? "\n" : "\n\n")
+      return (needsLeadingBreak ? "\n\n" : "") + markdown + trailingBreak
     }
 
     @objc func openDocument(_ sender: Any?) {

@@ -103,6 +103,66 @@
       XCTAssertEqual(textView.string, source)
     }
 
+    func testBundledPicsumExampleIsRecognizedWithDefaultWidth() throws {
+      let source = "![A rendered image card](https://picsum.photos/1200/640)\n"
+      let plan = try renderPlan(source)
+      let text = source as NSString
+      let imageNode = try XCTUnwrap(plan.nodes.first {
+        $0.kind == Int(MD_NODE_IMAGE.rawValue)
+      })
+      let descriptor = try XCTUnwrap(
+        MarkdownImageDescriptor.parse(range: imageNode.range, source: text)
+      )
+      let textView = MarkdownTextView(usingTextLayoutManager: true)
+      textView.string = source
+
+      MarkdownRenderer().apply(plan: plan, invalidatedRange: nil, to: textView)
+
+      XCTAssertEqual(descriptor.destination, "https://picsum.photos/1200/640")
+      XCTAssertEqual(descriptor.width, 512)
+      XCTAssertEqual(textView.markdownImages.first?.url.absoluteString, descriptor.destination)
+      XCTAssertEqual(textView.string, source)
+    }
+
+    func testDownArrowLeavesImageSourceObjectEvenAtDocumentEnd() throws {
+      let source = "Before.\n\n![Figure 1.](<assets/plot.png> \"width=512\")\n"
+      let text = source as NSString
+      let plan = try renderPlan(source)
+      let image = try XCTUnwrap(plan.nodes.first {
+        $0.kind == Int(MD_NODE_IMAGE.rawValue)
+      })
+      let selection = NSRange(location: image.range.location + 3, length: 0)
+
+      let target = EditorViewController.imageNavigationTarget(
+        for: #selector(NSResponder.moveDown(_:)),
+        selection: selection,
+        plan: plan
+      )
+
+      XCTAssertEqual(target, text.length)
+      XCTAssertFalse(NSLocationInRange(try XCTUnwrap(target), image.range))
+    }
+
+    func testImageInspectorUsesCompactNativeGeometry() throws {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+      try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+      defer { try? FileManager.default.removeItem(at: root) }
+      let imageURL = root.appendingPathComponent("preview.png")
+      try makeImage(width: 200, height: 100).write(to: imageURL)
+
+      let controller = ImageImportPanelController(
+        imageURL: imageURL, figureNumber: 1, completion: { _ in }
+      )
+      let frame = try XCTUnwrap(controller.window).contentLayoutRect
+
+      XCTAssertLessThanOrEqual(frame.width, 470)
+      XCTAssertLessThanOrEqual(frame.height, 340)
+      if #available(macOS 26.0, *) {
+        XCTAssertTrue(controller.window?.contentView is NSGlassEffectView)
+      }
+    }
+
     private func makeImage(width: Int, height: Int) throws -> Data {
       let bitmap = try XCTUnwrap(NSBitmapImageRep(
         bitmapDataPlanes: nil,
