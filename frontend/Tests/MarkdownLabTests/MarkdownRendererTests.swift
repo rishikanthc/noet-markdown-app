@@ -176,6 +176,106 @@
       XCTAssertEqual(ordinary, text.paragraphRange(for: text.range(of: "Between blocks")))
     }
 
+    func testDisplayEquationIsOneEngineOwnedEditingObject() throws {
+      let source = "Before.\n\n$$\nE = mc^{2}\n$$\n\nAfter.\n"
+      let text = source as NSString
+      let plan = try renderPlan(source)
+      let renderer = MarkdownRenderer()
+
+      let blocks = plan.spans.filter { $0.role == Int(MD_SPAN_MATH_BLOCK.rawValue) }
+      let contents = plan.spans.filter { $0.role == Int(MD_SPAN_MATH_CONTENT.rawValue) }
+      let delimiters = plan.spans.filter { $0.role == Int(MD_SPAN_MATH_DELIMITER.rawValue) }
+      XCTAssertEqual(blocks.count, 1)
+      XCTAssertEqual(contents.count, 1)
+      XCTAssertEqual(delimiters.count, 2)
+      XCTAssertEqual(text.substring(with: contents[0].range), "E = mc^{2}")
+
+      let fromExpression = renderer.editingRange(
+        containing: text.range(of: "mc").location, in: plan
+      )
+      let fromDelimiter = renderer.editingRange(
+        containing: delimiters[0].range.location, in: plan
+      )
+      XCTAssertEqual(fromExpression, blocks[0].range)
+      XCTAssertEqual(fromDelimiter, blocks[0].range)
+    }
+
+    func testInactiveEquationConcealsSourceAndAppliesTypstMathPresentation() throws {
+      let source = "Before.\n\n$$\nE = mc^{2}\n$$\n\nAfter.\n"
+      let text = source as NSString
+      let plan = try renderPlan(source)
+      let renderer = MarkdownRenderer()
+      let textView = MarkdownTextView(usingTextLayoutManager: true)
+      textView.string = source
+      let after = text.paragraphRange(for: text.range(of: "After"))
+
+      renderer.apply(
+        plan: plan, invalidatedRange: nil,
+        activeEditingRange: after, to: textView
+      )
+
+      let delimiter = plan.spans.first { $0.role == Int(MD_SPAN_MATH_DELIMITER.rawValue) }!
+      let delimiterColor = textView.textStorage?.attribute(
+        .foregroundColor, at: delimiter.range.location, effectiveRange: nil
+      ) as? NSColor
+      let delimiterStyle = textView.textStorage?.attribute(
+        .paragraphStyle, at: delimiter.range.location, effectiveRange: nil
+      ) as? NSParagraphStyle
+      XCTAssertEqual(delimiterColor, .clear)
+      XCTAssertEqual(delimiterStyle?.maximumLineHeight, 0.1)
+
+      let equationLocation = text.range(of: "E =").location
+      let equationFont = textView.textStorage?.attribute(
+        .font, at: equationLocation, effectiveRange: nil
+      ) as? NSFont
+      let equationStyle = textView.textStorage?.attribute(
+        .paragraphStyle, at: equationLocation, effectiveRange: nil
+      ) as? NSParagraphStyle
+      XCTAssertEqual(equationFont?.pointSize, Theme.sizeEquation)
+      XCTAssertEqual(equationStyle?.alignment, .center)
+
+      let exponent = text.range(of: "2")
+      let exponentFont = textView.textStorage?.attribute(
+        .font, at: exponent.location, effectiveRange: nil
+      ) as? NSFont
+      let baseline = textView.textStorage?.attribute(
+        .baselineOffset, at: exponent.location, effectiveRange: nil
+      ) as? CGFloat
+      XCTAssertEqual(
+        exponentFont?.pointSize ?? 0,
+        Theme.sizeEquation * Theme.equationScriptScale,
+        accuracy: 0.01
+      )
+      XCTAssertGreaterThan(baseline ?? 0, 0)
+      XCTAssertEqual(textView.string, source)
+    }
+
+    func testActiveEquationRevealsWholeSourceWithoutOffsetMutation() throws {
+      let source = "$$\nE = mc^2\n$$\n"
+      let text = source as NSString
+      let plan = try renderPlan(source)
+      let renderer = MarkdownRenderer()
+      let textView = MarkdownTextView(usingTextLayoutManager: true)
+      textView.string = source
+      let caret = NSRange(location: text.range(of: "mc").location + 1, length: 0)
+      textView.setSelectedRange(caret)
+      let active = renderer.editingRange(containing: caret.location, in: plan)
+
+      renderer.apply(
+        plan: plan, invalidatedRange: nil,
+        activeEditingRange: active, to: textView
+      )
+
+      for delimiter in plan.spans where delimiter.role == Int(MD_SPAN_MATH_DELIMITER.rawValue) {
+        let color = textView.textStorage?.attribute(
+          .foregroundColor, at: delimiter.range.location, effectiveRange: nil
+        ) as? NSColor
+        XCTAssertNotEqual(color, .clear)
+      }
+      XCTAssertEqual(textView.selectedRange(), caret)
+      XCTAssertEqual(textView.string, source)
+    }
+
     func testActivatingCompoundBlockRevealsAllOfItsSourceMarkers() throws {
       let source = """
         > [!NOTE]

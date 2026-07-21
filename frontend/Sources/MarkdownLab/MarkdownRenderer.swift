@@ -74,12 +74,18 @@
       plan: MarkdownRenderPlan,
       source: NSString
     ) -> NSRange {
-      plan.nodes.reduce(range) { result, node in
+      let nodeEnvelope = plan.nodes.reduce(range) { result, node in
         guard node.range.intersection(result) != nil else { return result }
         let isCodeBlock = node.kind == Int(MD_NODE_CODE_BLOCK.rawValue)
         let isCallout = node.kind == Int(MD_NODE_BLOCK_QUOTE.rawValue)
           && callout(in: node.range, source: source) != nil
         return isCodeBlock || isCallout ? NSUnionRange(result, node.range) : result
+      }
+      return plan.spans.reduce(nodeEnvelope) { result, span in
+        guard span.role == Int(MD_SPAN_MATH_BLOCK.rawValue),
+          span.range.intersection(result) != nil
+        else { return result }
+        return NSUnionRange(result, span.range)
       }
     }
 
@@ -91,6 +97,16 @@
       guard source.length > 0 else { return NSRange(location: 0, length: 0) }
       let caret = min(max(offset, 0), source.length)
       let probe = min(caret, source.length - 1)
+
+      if let equation = plan.spans
+        .filter({ span in
+          span.role == Int(MD_SPAN_MATH_BLOCK.rawValue)
+            && (NSLocationInRange(probe, span.range) || caret == NSMaxRange(span.range))
+        })
+        .min(by: { $0.range.length < $1.range.length })
+      {
+        return equation.range
+      }
 
       let compound = plan.nodes
         .filter { node in
@@ -136,6 +152,11 @@
         activeEditingRange: activeEditingRange, storage: storage
       )
 
+      applyEquations(
+        spans: spans, in: range, source: storage.string as NSString,
+        activeEditingRange: activeEditingRange, storage: storage
+      )
+
       // Syntax concealment is the final semantic layer, so highlighter colors
       // can never make a fence or delimiter visible again.
       for span in spans {
@@ -152,6 +173,11 @@
         {
           collapseFenceParagraph(containing: spanRange, storage: storage)
         }
+        if span.role == Int(MD_SPAN_MATH_DELIMITER.rawValue),
+          activeEditingRange?.intersection(spanRange) == nil
+        {
+          collapseFenceParagraph(containing: spanRange, storage: storage)
+        }
       }
 
       applyHighlightSyntax(
@@ -160,7 +186,8 @@
       )
 
       collapseStructuralBlankParagraphs(
-        in: range, nodes: nodes, source: storage.string as NSString, storage: storage
+        in: range, nodes: nodes, spans: spans,
+        source: storage.string as NSString, storage: storage
       )
     }
 
@@ -278,7 +305,8 @@
         Int(MD_SPAN_BLOCK_QUOTE_MARKER.rawValue),
         Int(MD_SPAN_LIST_MARKER.rawValue),
         Int(MD_SPAN_TASK_MARKER.rawValue),
-        Int(MD_SPAN_TABLE_DELIMITER.rawValue):
+        Int(MD_SPAN_TABLE_DELIMITER.rawValue),
+        Int(MD_SPAN_MATH_DELIMITER.rawValue):
         return true
       default:
         return false
@@ -524,6 +552,109 @@
       storage.addAttribute(.paragraphStyle, value: style, range: paragraph)
     }
 
+    private struct EquationBlock {
+      let range: NSRange
+      let contentRange: NSRange
+    }
+
+    private func equations(in spans: [MarkdownRenderPlan.Span]) -> [EquationBlock] {
+      let contents = spans.filter { $0.role == Int(MD_SPAN_MATH_CONTENT.rawValue) }
+      return spans.compactMap { block in
+        guard block.role == Int(MD_SPAN_MATH_BLOCK.rawValue),
+          let content = contents.first(where: { block.range.intersection($0.range) == $0.range })
+        else { return nil }
+        return EquationBlock(range: block.range, contentRange: content.range)
+      }
+    }
+
+    private func applyEquations(
+      spans: [MarkdownRenderPlan.Span],
+      in targetRange: NSRange,
+      source: NSString,
+      activeEditingRange: NSRange?,
+      storage: NSTextStorage
+    ) {
+      for equation in equations(in: spans) {
+        guard let block = equation.range.intersection(targetRange), block.length > 0 else { continue }
+        let isActive = activeEditingRange?.intersection(equation.range) != nil
+        if isActive {
+          storage.addAttributes([
+            .font: Theme.mono(Theme.sizeBodySmall),
+            .foregroundColor: Theme.textCol,
+            .ligature: 0,
+            .paragraphStyle: bodyParagraphStyle(),
+          ], range: block)
+          continue
+        }
+
+        guard let content = equation.contentRange.intersection(targetRange), content.length > 0
+        else { continue }
+        let style = NSMutableParagraphStyle()
+        style.alignment = .center
+        style.lineSpacing = 0
+        style.paragraphSpacingBefore = max(Theme.equationMargin - Theme.bodyLineSpacing, 0)
+        style.paragraphSpacing = max(Theme.equationMargin - Theme.bodyLineSpacing, 0)
+        style.lineBreakMode = .byWordWrapping
+        storage.addAttributes([
+          .font: Theme.serif(Theme.sizeEquation),
+          .foregroundColor: Theme.ink,
+          .paragraphStyle: style,
+          .ligature: 1,
+        ], range: content)
+        applyEquationScripts(in: content, source: source, storage: storage)
+      }
+    }
+
+    /// A deliberately small source-preserving TeX presentation layer. The
+    /// engine identifies equation ownership; TextKit changes only glyph
+    /// attributes for scripts, leaving UTF-16 offsets and the caret untouched.
+    private func applyEquationScripts(
+      in range: NSRange,
+      source: NSString,
+      storage: NSTextStorage
+    ) {
+      var location = range.location
+      let end = NSMaxRange(range)
+      while location < end {
+        let scalar = source.character(at: location)
+        guard scalar == 0x5E || scalar == 0x5F else {
+          location += 1
+          continue
+        }
+        let isSuperscript = scalar == 0x5E
+        applyMarker(
+          to: NSRange(location: location, length: 1), activeEditingRange: nil,
+          source: source, storage: storage
+        )
+        var scriptStart = location + 1
+        var scriptEnd = min(scriptStart + 1, end)
+        if scriptStart < end, source.character(at: scriptStart) == 0x7B {
+          applyMarker(
+            to: NSRange(location: scriptStart, length: 1), activeEditingRange: nil,
+            source: source, storage: storage
+          )
+          scriptStart += 1
+          var cursor = scriptStart
+          while cursor < end, source.character(at: cursor) != 0x7D { cursor += 1 }
+          scriptEnd = cursor
+          if cursor < end {
+            applyMarker(
+              to: NSRange(location: cursor, length: 1), activeEditingRange: nil,
+              source: source, storage: storage
+            )
+          }
+        }
+        if scriptEnd > scriptStart {
+          let scriptRange = NSRange(location: scriptStart, length: scriptEnd - scriptStart)
+          storage.addAttributes([
+            .font: Theme.serif(Theme.sizeEquation * Theme.equationScriptScale),
+            .baselineOffset: isSuperscript ? Theme.sizeEquation * 0.34 : -Theme.sizeEquation * 0.20,
+          ], range: scriptRange)
+        }
+        location = max(scriptEnd, location + 1)
+      }
+    }
+
     private func synchronizeTypingAttributes(in textView: NSTextView, storage: NSTextStorage) {
       let selection = textView.selectedRange()
       guard selection.length == 0, storage.length > 0 else {
@@ -653,16 +784,20 @@
     private func collapseStructuralBlankParagraphs(
       in range: NSRange,
       nodes: [MarkdownRenderPlan.Node],
+      spans: [MarkdownRenderPlan.Span],
       source: NSString,
       storage: NSTextStorage
     ) {
-      let compoundRanges = nodes.compactMap { node -> NSRange? in
+      var compoundRanges = nodes.compactMap { node -> NSRange? in
         if node.kind == Int(MD_NODE_CODE_BLOCK.rawValue) { return node.range }
         if node.kind == Int(MD_NODE_BLOCK_QUOTE.rawValue),
           callout(in: node.range, source: source) != nil
         { return node.range }
         return nil
       }
+      compoundRanges.append(contentsOf: spans.compactMap { span in
+        span.role == Int(MD_SPAN_MATH_BLOCK.rawValue) ? span.range : nil
+      })
       var location = range.location
       while location < NSMaxRange(range) {
         let paragraph = source.paragraphRange(for: NSRange(location: location, length: 0))

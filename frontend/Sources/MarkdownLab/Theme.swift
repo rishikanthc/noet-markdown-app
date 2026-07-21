@@ -116,6 +116,8 @@
     static let sizeCaption: CGFloat = 13.5
     static let sizeMicro: CGFloat = 12.5
     static let sizeEquation: CGFloat = 21
+    static let equationScriptScale: CGFloat = 0.72
+    static let equationMargin: CGFloat = 15
     static let headingSizes: [CGFloat] = [25, 20.5, 18, 16.8, 16, 16]
 
     // MARK: - Rhythm

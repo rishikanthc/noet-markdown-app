@@ -138,6 +138,9 @@ pub const SpanRole = enum(u16) {
     table_delimiter,
     html,
     syntax_marker,
+    math_block,
+    math_content,
+    math_delimiter,
 };
 
 pub const span_dim_when_inactive: u16 = 1 << 0;

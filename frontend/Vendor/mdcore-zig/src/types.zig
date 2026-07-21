@@ -138,6 +138,9 @@ pub const SpanRole = enum(u16) {
     table_delimiter,
     html,
     syntax_marker,
+    math_block,
+    math_content,
+    math_delimiter,
 };
 
 pub const span_dim_when_inactive: u16 = 1 << 0;
@@ -171,7 +174,6 @@ pub const SpanView = extern struct {
     ptr: ?[*]const DecorationSpan,
     len: usize,
 };
-
 
 pub const CommandKind = enum(c_int) {
     toggle_emphasis = 1,

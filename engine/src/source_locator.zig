@@ -460,6 +460,69 @@ fn emitTable(sink: *Sink, source: []const u8, node: t.SemanticNode) void {
     }
 }
 
+fn isMathProtected(nodes: []const t.SemanticNode, offset: usize) bool {
+    for (nodes) |node| {
+        const protected = node.kind == @intFromEnum(t.NodeKind.code_block) or
+            node.kind == @intFromEnum(t.NodeKind.code_span) or
+            node.kind == @intFromEnum(t.NodeKind.html_block) or
+            node.kind == @intFromEnum(t.NodeKind.html_inline);
+        if (!protected) continue;
+        const start: usize = @intCast(node.source_start_byte);
+        const end: usize = @intCast(node.source_end_byte);
+        if (offset >= start and offset < end) return true;
+    }
+    return false;
+}
+
+fn mathDelimiter(source: []const u8, line_start: usize, line_end: usize) ?struct { start: usize, end: usize } {
+    var cursor = line_start;
+    var indentation: usize = 0;
+    while (cursor < line_end and source[cursor] == ' ' and indentation < 4) : (indentation += 1) cursor += 1;
+    if (indentation > 3 or cursor + 2 > line_end) return null;
+    if (!std.mem.eql(u8, source[cursor .. cursor + 2], "$$")) return null;
+    if (trimAsciiSpaceRight(source, cursor + 2, line_end) != cursor + 2) return null;
+    return .{ .start = cursor, .end = cursor + 2 };
+}
+
+/// Emits source-preserving display-math structure. MdCore owns recognition;
+/// clients only decide how these exact byte ranges are presented.
+fn emitDisplayMath(sink: *Sink, source: []const u8, nodes: []const t.SemanticNode) void {
+    var opening: ?struct { line_start: usize, marker_start: usize, marker_end: usize, content_start: usize } = null;
+    var line_start: usize = 0;
+    while (line_start < source.len) {
+        const end = lineEnd(source, line_start, source.len);
+        const next = nextLineStart(source, end, source.len);
+        if (!isMathProtected(nodes, line_start)) {
+            if (mathDelimiter(source, line_start, end)) |marker| {
+                if (opening) |start| {
+                    var content_end = line_start;
+                    while (content_end > start.content_start and
+                        (source[content_end - 1] == '\n' or source[content_end - 1] == '\r'))
+                    {
+                        content_end -= 1;
+                    }
+                    const node_id = 0x4d41544800000000 ^ @as(u64, @intCast(start.marker_start)) ^
+                        (@as(u64, @intCast(marker.end)) << 1);
+                    sink.emit(node_id, start.line_start, marker.end, .math_block, 0);
+                    sink.emit(node_id, start.marker_start, start.marker_end, .math_delimiter, marker_behavior);
+                    sink.emit(node_id, start.content_start, content_end, .math_content, 0);
+                    sink.emit(node_id, marker.start, marker.end, .math_delimiter, marker_behavior);
+                    opening = null;
+                } else {
+                    opening = .{
+                        .line_start = line_start,
+                        .marker_start = marker.start,
+                        .marker_end = marker.end,
+                        .content_start = next,
+                    };
+                }
+            }
+        }
+        if (next <= line_start) break;
+        line_start = next;
+    }
+}
+
 fn locate(source: []const u8, nodes: []const t.SemanticNode, sink: *Sink) void {
     for (nodes) |node| {
         const kind = node.kind;
@@ -490,6 +553,7 @@ fn locate(source: []const u8, nodes: []const t.SemanticNode, sink: *Sink) void {
             sink.emit(node.id, range.start, range.end, .syntax_marker, marker_behavior);
         }
     }
+    emitDisplayMath(sink, source, nodes);
 }
 
 pub fn countMarkerSpans(source: []const u8, nodes: []const t.SemanticNode) usize {
@@ -528,6 +592,34 @@ test "source locator refines common inline and block constructs" {
         try std.testing.expect(span.start_byte < span.end_byte);
         try std.testing.expect(span.end_byte <= source.len);
     }
+}
+
+test "display math is one semantic decoration object and ignores code" {
+    const source = "```text\n$$\nnot math\n$$\n```\n\n$$\nE = mc^2\n$$\n";
+    const code_end = std.mem.indexOf(u8, source, "```\n\n").? + 3;
+    const nodes = [_]t.SemanticNode{
+        .{ .id = 1, .parent_index = 0, .first_child_index = 0, .child_count = 0, .kind = @intFromEnum(t.NodeKind.code_block), .flags = 0, .source_start_byte = 0, .source_end_byte = code_end, .content_start_byte = 8, .content_end_byte = code_end - 3, .metadata_index = 0, .reserved = 0 },
+    };
+    const count = countMarkerSpans(source, &nodes);
+    const spans = try std.testing.allocator.alloc(t.DecorationSpan, count);
+    defer std.testing.allocator.free(spans);
+    _ = writeMarkerSpans(source, &nodes, spans);
+
+    var blocks: usize = 0;
+    var contents: usize = 0;
+    var delimiters: usize = 0;
+    for (spans) |span| {
+        const role: t.SpanRole = @enumFromInt(span.role);
+        if (role == .math_block) blocks += 1;
+        if (role == .math_content) {
+            contents += 1;
+            try std.testing.expectEqualStrings("E = mc^2", source[@intCast(span.start_byte)..@intCast(span.end_byte)]);
+        }
+        if (role == .math_delimiter) delimiters += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), blocks);
+    try std.testing.expectEqual(@as(usize, 1), contents);
+    try std.testing.expectEqual(@as(usize, 2), delimiters);
 }
 
 test "setext headings and angle autolinks recover content and markers" {
