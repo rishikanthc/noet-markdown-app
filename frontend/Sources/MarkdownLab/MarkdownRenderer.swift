@@ -548,7 +548,7 @@
     private func bodyParagraphStyle() -> NSParagraphStyle {
       let style = NSMutableParagraphStyle()
       style.lineSpacing = Theme.bodyLineSpacing
-      style.paragraphSpacing = Theme.paragraphSpacing
+      style.paragraphSpacing = max(Theme.paragraphSpacing - Theme.bodyLineSpacing, 0)
       style.lineBreakMode = .byWordWrapping
       style.hyphenationFactor = 0
       return style
@@ -564,14 +564,20 @@
       style.lineSpacing = level <= 2 ? 1.5 : 2
       switch level {
       case 1:
-        style.paragraphSpacingBefore = max(Theme.space9 - precedingSpacing, 0)
-        style.paragraphSpacing = Theme.space4
+        style.paragraphSpacingBefore = max(
+          Theme.space9 - precedingSpacing - style.lineSpacing, 0
+        )
+        style.paragraphSpacing = max(Theme.space4 - Theme.bodyLineSpacing, 0)
       case 2:
-        style.paragraphSpacingBefore = max(Theme.space8 - precedingSpacing, 0)
-        style.paragraphSpacing = Theme.space3
+        style.paragraphSpacingBefore = max(
+          Theme.space8 - precedingSpacing - style.lineSpacing, 0
+        )
+        style.paragraphSpacing = max(Theme.space3 - Theme.bodyLineSpacing, 0)
       default:
-        style.paragraphSpacingBefore = max(Theme.space5 - precedingSpacing, 0)
-        style.paragraphSpacing = Theme.space2
+        style.paragraphSpacingBefore = max(
+          Theme.space5 - precedingSpacing - style.lineSpacing, 0
+        )
+        style.paragraphSpacing = max(Theme.space2 - Theme.bodyLineSpacing, 0)
       }
       return style
     }
@@ -605,12 +611,16 @@
         style.tailIndent = -Theme.space4
         style.lineSpacing = Theme.bodyLineSpacing
         style.paragraphSpacingBefore = index == 0
-          ? max(Theme.space6 + Theme.space3 - precedingSpacing, 0)
+          ? max(
+            Theme.space6 + Theme.space3 - precedingSpacing - Theme.bodyLineSpacing, 0
+          )
           : 0
         if index == paragraphs.count - 1 {
-          style.paragraphSpacing = Theme.space6 + Theme.space3
+          style.paragraphSpacing = max(
+            Theme.space6 + Theme.space3 - Theme.bodyLineSpacing, 0
+          )
         } else if kind == .callout, index == 0 {
-          style.paragraphSpacing = Theme.space1
+          style.paragraphSpacing = max(Theme.space1 - Theme.bodyLineSpacing, 0)
         } else {
           style.paragraphSpacing = 0
         }
@@ -667,7 +677,11 @@
           style.lineSpacing = 0
           style.paragraphSpacing = 0
           style.paragraphSpacingBefore = 0
-          storage.addAttribute(.paragraphStyle, value: style, range: clipped)
+          storage.addAttributes([
+            .font: Theme.serif(0.1),
+            .foregroundColor: NSColor.clear,
+            .paragraphStyle: style,
+          ], range: clipped)
         }
         location = NSMaxRange(paragraph)
       }

@@ -302,8 +302,12 @@
           let style = textView.textStorage?.attribute(
             .paragraphStyle, at: paragraph.location, effectiveRange: nil
           ) as? NSParagraphStyle
+          let font = textView.textStorage?.attribute(
+            .font, at: paragraph.location, effectiveRange: nil
+          ) as? NSFont
           XCTAssertEqual(style?.maximumLineHeight, 0.1)
           XCTAssertEqual(style?.paragraphSpacing, 0)
+          XCTAssertEqual(font?.pointSize, 0.1)
         }
         searchLocation = NSMaxRange(paragraph)
       }
@@ -316,7 +320,9 @@
         .paragraphStyle, at: text.range(of: "Section").location, effectiveRange: nil
       ) as? NSParagraphStyle
       XCTAssertEqual(
-        (introStyle?.paragraphSpacing ?? 0) + (headingStyle?.paragraphSpacingBefore ?? 0),
+        (introStyle?.paragraphSpacing ?? 0)
+          + (headingStyle?.paragraphSpacingBefore ?? 0)
+          + (headingStyle?.lineSpacing ?? 0),
         Theme.space8,
         accuracy: 0.01
       )
@@ -328,10 +334,51 @@
         .paragraphStyle, at: text.range(of: "> [!NOTE]").location, effectiveRange: nil
       ) as? NSParagraphStyle
       XCTAssertEqual(
-        (bodyStyle?.paragraphSpacing ?? 0) + (calloutStyle?.paragraphSpacingBefore ?? 0),
+        (bodyStyle?.paragraphSpacing ?? 0)
+          + (calloutStyle?.paragraphSpacingBefore ?? 0)
+          + Theme.bodyLineSpacing,
         Theme.space6 + Theme.space3,
         accuracy: 0.01
       )
+    }
+
+    func testTextKitGeometryUsesOnlyTypstOwnedVerticalGaps() throws {
+      let source = """
+        # Title
+
+        Intro paragraph.
+
+        ## Section
+
+        Body paragraph.
+
+        > [!NOTE]
+        > Callout body.
+
+        Following paragraph.
+        """
+      let text = source as NSString
+      let textView = MarkdownTextView(usingTextLayoutManager: true)
+      textView.frame = NSRect(x: 0, y: 0, width: 1_000, height: 1_400)
+      textView.string = source
+      MarkdownRenderer().apply(
+        plan: try renderPlan(source), invalidatedRange: nil, to: textView
+      )
+
+      let title = try segmentFrame(for: text.range(of: "Title"), in: textView)
+      let intro = try segmentFrame(for: text.range(of: "Intro paragraph"), in: textView)
+      let section = try segmentFrame(for: text.range(of: "Section"), in: textView)
+      let body = try segmentFrame(for: text.range(of: "Body paragraph"), in: textView)
+      let note = try segmentFrame(for: text.range(of: "NOTE"), in: textView)
+      let callout = try segmentFrame(for: text.range(of: "Callout body"), in: textView)
+      let following = try segmentFrame(for: text.range(of: "Following paragraph"), in: textView)
+
+      XCTAssertLessThanOrEqual(intro.minY - title.maxY, Theme.space4 + 0.5)
+      XCTAssertLessThanOrEqual(section.minY - intro.maxY, Theme.space8 + 0.5)
+      XCTAssertLessThanOrEqual(body.minY - section.maxY, Theme.space3 + 0.5)
+      XCTAssertLessThanOrEqual(note.minY - body.maxY, Theme.space6 + Theme.space3 + 0.5)
+      XCTAssertLessThanOrEqual(callout.minY - note.maxY, Theme.space1 + 0.5)
+      XCTAssertLessThanOrEqual(following.minY - callout.maxY, Theme.space6 + Theme.space3 + 0.5)
     }
 
     func testSemanticRestyleDoesNotMoveCaretAfterTyping() throws {
@@ -396,6 +443,23 @@
         },
         versionSummary: engine.versionSummary
       )
+    }
+
+    private func segmentFrame(for range: NSRange, in textView: NSTextView) throws -> CGRect {
+      let content = try XCTUnwrap(textView.textContentStorage)
+      let layout = try XCTUnwrap(textView.textLayoutManager)
+      let start = try XCTUnwrap(content.location(content.documentRange.location, offsetBy: range.location))
+      let end = try XCTUnwrap(content.location(start, offsetBy: range.length))
+      let textRange = try XCTUnwrap(NSTextRange(location: start, end: end))
+      layout.ensureLayout(for: textRange)
+      var frame = CGRect.null
+      layout.enumerateTextSegments(
+        in: textRange, type: .standard, options: [.rangeNotRequired]
+      ) { _, segment, _, _ in
+        frame = frame.union(segment)
+        return true
+      }
+      return try XCTUnwrap(frame.isNull ? nil : frame)
     }
   }
 #endif
